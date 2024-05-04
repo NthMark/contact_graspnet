@@ -550,26 +550,34 @@ def batch_norm_template(inputs, is_training, scope, moments_dims_unused, bn_deca
       normed:        batch-normalized maps
   """
   bn_decay = bn_decay if bn_decay is not None else 0.9
-  if not TF2:
-    return tf.contrib.layers.batch_norm(inputs, 
-                                      center=True, scale=True,
-                                      is_training=is_training, decay=bn_decay,updates_collections=None,
-                                      scope=scope,
-                                      data_format=data_format)
+  with tf.compat.v1.variable_scope(scope):
+        # Determine axis for moments calculation
+        if data_format == 'NHWC':
+            axis = -1
+        elif data_format == 'NCHW':
+            axis = 1
 
-  if data_format == 'NHWC':
-    axis = -1
-  elif data_format == 'NCHW':
-    axis = 1
-  else:
-    raise NotImplementedError(
-      'data_format {} is not supported for batch norm.'.format(data_format)
-    )
-  
-  return tf.compat.v1.layers.batch_normalization(
-      inputs, center=True, scale=True, training=is_training,
-      momentum=bn_decay, axis=axis, name=scope,
-    )
+        # Calculate mean and variance
+        batch_mean, batch_variance = tf.nn.moments(inputs, axes=moments_dims_unused)
+
+        # Create trainable variables for scale and offset (gamma and beta)
+        scale = tf.compat.v1.get_variable('scale', shape=[inputs.get_shape()[-1]],
+                                          initializer=tf.compat.v1.ones_initializer(), trainable=True)
+        offset = tf.compat.v1.get_variable('offset', shape=[inputs.get_shape()[-1]],
+                                           initializer=tf.compat.v1.zeros_initializer(), trainable=True)
+
+        # Create exponential moving average variables for mean and variance
+        ema = tf.train.ExponentialMovingAverage(decay=bn_decay)
+        ema_apply_op = ema.apply([batch_mean, batch_variance])
+        with tf.control_dependencies([ema_apply_op]):
+            ema_mean, ema_variance = tf.identity(batch_mean), tf.identity(batch_variance)
+
+        # Normalize inputs
+        return tf.cond(
+          is_training,
+          lambda : tf.nn.batch_normalization(inputs, batch_mean, batch_variance,scale ,offset,1e-3),
+          lambda : tf.nn.batch_normalization(inputs, ema_mean, ema_variance, offset, scale, 1e-3)
+        )
   #return tf.contrib.layers.batch_norm(inputs, 
   #                                    center=True, scale=True,
   #                                    is_training=is_training, decay=bn_decay,updates_collections=None,
